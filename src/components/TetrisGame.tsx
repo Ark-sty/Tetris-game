@@ -1,3 +1,5 @@
+// (생략된 import 및 기본 설정은 유지)
+
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 
 // 테트리스 블록 타입 정의
@@ -34,9 +36,14 @@ const TetrisGame: React.FC = () => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const [gameOver, setGameOver] = useState(false);
     const [score, setScore] = useState(0);
+    const [level, setLevel] = useState(0);
+    const [linesClearedTotal, setLinesClearedTotal] = useState(0);
     const [isPlaying, setIsPlaying] = useState(false);
+    const [lockDelayTimer, setLockDelayTimer] = useState<NodeJS.Timeout | null>(null);
+    const [dropInterval, setDropInterval] = useState<NodeJS.Timeout | null>(null);
+    const [lastDropTime, setLastDropTime] = useState<number>(Date.now());
+    const [nextBlockType, setNextBlockType] = useState<BlockType | null>(null);
 
-    // 게임 상태
     const [board, setBoard] = useState<number[][]>(
         Array(BOARD_HEIGHT).fill(null).map(() => Array(BOARD_WIDTH).fill(0))
     );
@@ -46,36 +53,57 @@ const TetrisGame: React.FC = () => {
         shape: number[][];
     } | null>(null);
 
-    // 새로운 블록 생성
     const createNewBlock = useCallback(() => {
         const types: BlockType[] = ['I', 'O', 'T', 'L', 'J', 'S', 'Z'];
-        const type = types[Math.floor(Math.random() * types.length)];
-        const shape = BLOCKS[type];
+        const nextType = nextBlockType || types[Math.floor(Math.random() * types.length)];
+        const shape = BLOCKS[nextType];
 
         setCurrentBlock({
-            type,
+            type: nextType,
             position: { x: Math.floor(BOARD_WIDTH / 2) - Math.floor(shape[0].length / 2), y: 0 },
             shape
         });
-    }, []);
 
-    // 게임 오버 처리 함수 추가
+        const newType = types[Math.floor(Math.random() * types.length)];
+        setNextBlockType(newType);
+    }, [nextBlockType]);
+
     const handleGameOver = useCallback(() => {
         setGameOver(true);
         setIsPlaying(false);
-        setScore(0);
-    }, []);
 
-    // 게임 시작
+        // 게임 오버 시 점수 저장
+        const playerName = prompt('플레이어 이름을 입력해주세요:') || 'Anonymous';
+        const newScore = {
+            id: Date.now(),
+            playerName,
+            score,
+            level,
+            date: new Date().toISOString()
+        };
+
+        const savedScores = localStorage.getItem('tetrisScores');
+        const scores = savedScores ? JSON.parse(savedScores) : [];
+        scores.push(newScore);
+        localStorage.setItem('tetrisScores', JSON.stringify(scores));
+
+        setScore(0);
+    }, [score, level]);
+
     const startGame = useCallback(() => {
         setBoard(Array(BOARD_HEIGHT).fill(null).map(() => Array(BOARD_WIDTH).fill(0)));
         setScore(0);
+        setLevel(0);
+        setLinesClearedTotal(0);
         setGameOver(false);
         setIsPlaying(true);
+        setLastDropTime(Date.now());
+
+        const types: BlockType[] = ['I', 'O', 'T', 'L', 'J', 'S', 'Z'];
+        setNextBlockType(types[Math.floor(Math.random() * types.length)]);
         createNewBlock();
     }, [createNewBlock]);
 
-    // 이동 가능 여부 확인
     const isValidMove = useCallback((position: { x: number; y: number }, shape: number[][]) => {
         for (let y = 0; y < shape.length; y++) {
             for (let x = 0; x < shape[y].length; x++) {
@@ -97,7 +125,6 @@ const TetrisGame: React.FC = () => {
         return true;
     }, [board]);
 
-    // 블록 배치
     const placeBlock = useCallback(() => {
         if (!currentBlock) return;
 
@@ -108,7 +135,6 @@ const TetrisGame: React.FC = () => {
                     const boardY = currentBlock.position.y + y;
                     const boardX = currentBlock.position.x + x;
 
-                    // 게임 오버 조건: 블록이 화면 상단을 벗어나거나 다른 블록과 겹칠 때
                     if (boardY < 0 || (boardY < BOARD_HEIGHT && newBoard[boardY][boardX] === 1)) {
                         handleGameOver();
                         return;
@@ -126,7 +152,15 @@ const TetrisGame: React.FC = () => {
         createNewBlock();
     }, [currentBlock, board, createNewBlock, handleGameOver]);
 
-    // 블록 이동
+    const isTouchingGround = useCallback(() => {
+        if (!currentBlock) return false;
+        const testPosition = {
+            x: currentBlock.position.x,
+            y: currentBlock.position.y + 1
+        };
+        return !isValidMove(testPosition, currentBlock.shape);
+    }, [currentBlock, isValidMove]);
+
     const moveBlock = useCallback((dx: number, dy: number) => {
         if (!currentBlock || gameOver) return;
 
@@ -135,19 +169,56 @@ const TetrisGame: React.FC = () => {
             y: currentBlock.position.y + dy
         };
 
-        // 충돌 검사
         if (isValidMove(newPosition, currentBlock.shape)) {
-            setCurrentBlock({
-                ...currentBlock,
-                position: newPosition
-            });
-        } else if (dy > 0) {
-            // 바닥에 닿았을 때
-            placeBlock();
-        }
-    }, [currentBlock, gameOver, isValidMove, placeBlock]);
+            setCurrentBlock({ ...currentBlock, position: newPosition });
 
-    // 블록 회전
+            if (dy !== 0 && isTouchingGround()) {
+                // 이미 lockDelayTimer가 있으면 새로 만들지 않는다!
+                if (!lockDelayTimer) {
+                    const timer = setTimeout(() => {
+                        placeBlock();
+                        setLockDelayTimer(null);
+                    }, 500);
+                    setLockDelayTimer(timer);
+                }
+            } else if (!isTouchingGround() && lockDelayTimer) {
+                // 바닥에서 떨어지면 타이머 취소
+                clearTimeout(lockDelayTimer);
+                setLockDelayTimer(null);
+            }
+        } else if (dy > 0) {
+            if (!lockDelayTimer) {
+                const timer = setTimeout(() => {
+                    placeBlock();
+                    setLockDelayTimer(null);
+                }, 500);
+                setLockDelayTimer(timer);
+            }
+        }
+    }, [currentBlock, gameOver, isValidMove, placeBlock, lockDelayTimer, isTouchingGround]);
+
+    // 점수 계산 함수 (NES 스타일)
+    const calculateScore = (lines: number, level: number): number => {
+        switch (lines) {
+            case 1: return 40 * (level + 1);
+            case 2: return 100 * (level + 1);
+            case 3: return 300 * (level + 1);
+            case 4: return 1200 * (level + 1);
+            default: return 0;
+        }
+    };
+
+    // SRS 회전을 위한 벽킥 시도
+    const tryWallKick = (position: { x: number; y: number }, rotated: number[][]): { x: number; y: number } | null => {
+        const offsets = [0, -1, 1, -2, 2];
+        for (const dx of offsets) {
+            const testPos = { x: position.x + dx, y: position.y };
+            if (isValidMove(testPos, rotated)) return testPos;
+        }
+        return null;
+    };
+
+    // 회전 함수 수정 (SRS 적용)
     const rotateBlock = useCallback(() => {
         if (!currentBlock || gameOver) return;
 
@@ -155,15 +226,26 @@ const TetrisGame: React.FC = () => {
             currentBlock.shape.map(row => row[i]).reverse()
         );
 
-        if (isValidMove(currentBlock.position, rotated)) {
-            setCurrentBlock({
-                ...currentBlock,
-                shape: rotated
-            });
-        }
-    }, [currentBlock, gameOver, isValidMove]);
+        const kicked = tryWallKick(currentBlock.position, rotated);
+        if (kicked) {
+            setCurrentBlock({ ...currentBlock, shape: rotated, position: kicked });
 
-    // 라인 체크 및 제거
+            if (isTouchingGround()) {
+                if (!lockDelayTimer) {
+                    const timer = setTimeout(() => {
+                        placeBlock();
+                        setLockDelayTimer(null);
+                    }, 500);
+                    setLockDelayTimer(timer);
+                }
+            } else if (!isTouchingGround() && lockDelayTimer) {
+                clearTimeout(lockDelayTimer);
+                setLockDelayTimer(null);
+            }
+        }
+    }, [currentBlock, gameOver, isValidMove, lockDelayTimer, isTouchingGround, placeBlock]);
+
+    // checkLines 함수 수정 (점수 및 레벨)
     const checkLines = useCallback((newBoard: number[][]) => {
         let linesCleared = 0;
 
@@ -177,12 +259,16 @@ const TetrisGame: React.FC = () => {
         }
 
         if (linesCleared > 0) {
-            setScore(prev => prev + linesCleared * 100);
+            setScore(prev => prev + calculateScore(linesCleared, level));
+            setLinesClearedTotal(prev => {
+                const total = prev + linesCleared;
+                setLevel(Math.floor(total / 10));
+                return total;
+            });
             setBoard(newBoard);
         }
-    }, []);
+    }, [level]);
 
-    // 하드 드롭 함수
     const hardDrop = useCallback(() => {
         if (!currentBlock || gameOver) return;
 
@@ -190,20 +276,15 @@ const TetrisGame: React.FC = () => {
         const shape = currentBlock.shape;
         const startPosition = currentBlock.position;
 
-        // 최대 이동 가능 거리 계산
-        while (
-            isValidMove({ x: startPosition.x, y: startPosition.y + dropDistance + 1 }, shape)
-        ) {
+        while (isValidMove({ x: startPosition.x, y: startPosition.y + dropDistance + 1 }, shape)) {
             dropDistance++;
         }
 
-        // 최종 위치
         const finalPosition = {
             x: startPosition.x,
             y: startPosition.y + dropDistance
         };
 
-        // 블록을 보드에 바로 고정
         const newBoard = [...board];
         for (let y = 0; y < shape.length; y++) {
             for (let x = 0; x < shape[y].length; x++) {
@@ -228,18 +309,36 @@ const TetrisGame: React.FC = () => {
         createNewBlock();
     }, [currentBlock, board, gameOver, isValidMove, handleGameOver, checkLines, createNewBlock]);
 
-    // 게임 루프
-    useEffect(() => {
+    // 게임 루프 수정 (레벨 기반 속도)
+    const gameLoop = useCallback(() => {
         if (!isPlaying) return;
 
-        const gameLoop = setInterval(() => {
+        const now = Date.now();
+        const speed = Math.max(1000 - level * 100, 100); // 최소 속도 제한
+        if (now - lastDropTime >= speed) {
             moveBlock(0, 1);
-        }, 1000);
+            setLastDropTime(now);
+        }
+    }, [isPlaying, moveBlock, lastDropTime, level]);
 
-        return () => clearInterval(gameLoop);
-    }, [isPlaying, moveBlock]);
+    useEffect(() => {
+        if (!isPlaying) {
+            if (dropInterval) {
+                clearInterval(dropInterval);
+                setDropInterval(null);
+            }
+            return;
+        }
 
-    // 키보드 이벤트 처리
+        const interval = setInterval(gameLoop, 16); // 약 60fps
+        setDropInterval(interval);
+
+        return () => {
+            clearInterval(interval);
+            setDropInterval(null);
+        };
+    }, [isPlaying, gameLoop]);
+
     useEffect(() => {
         const handleKeyPress = (e: KeyboardEvent) => {
             if (!isPlaying) return;
@@ -267,7 +366,18 @@ const TetrisGame: React.FC = () => {
         return () => window.removeEventListener('keydown', handleKeyPress);
     }, [isPlaying, moveBlock, rotateBlock, hardDrop]);
 
-    // 캔버스 렌더링
+    // 고스트 블록 위치 계산 함수 추가
+    const getGhostPosition = useCallback(() => {
+        if (!currentBlock) return null;
+        let dropY = currentBlock.position.y;
+        while (
+            isValidMove({ x: currentBlock.position.x, y: dropY + 1 }, currentBlock.shape)
+        ) {
+            dropY++;
+        }
+        return { x: currentBlock.position.x, y: dropY };
+    }, [currentBlock, isValidMove]);
+
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
@@ -275,42 +385,135 @@ const TetrisGame: React.FC = () => {
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
-        // 캔버스 초기화
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         // 보드 그리기
         for (let y = 0; y < BOARD_HEIGHT; y++) {
             for (let x = 0; x < BOARD_WIDTH; x++) {
                 if (board[y][x]) {
-                    ctx.fillStyle = '#666';
+                    // 그라데이션 생성
+                    const gradient = ctx.createLinearGradient(
+                        x * BLOCK_SIZE,
+                        y * BLOCK_SIZE,
+                        (x + 1) * BLOCK_SIZE,
+                        (y + 1) * BLOCK_SIZE
+                    );
+                    gradient.addColorStop(0, '#666');
+                    gradient.addColorStop(1, '#444');
+
+                    // 블록 그리기
+                    ctx.fillStyle = gradient;
                     ctx.fillRect(x * BLOCK_SIZE, y * BLOCK_SIZE, BLOCK_SIZE - 1, BLOCK_SIZE - 1);
+
+                    // 하이라이트 효과
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.1)';
+                    ctx.fillRect(x * BLOCK_SIZE, y * BLOCK_SIZE, BLOCK_SIZE - 1, 2);
+                    ctx.fillRect(x * BLOCK_SIZE, y * BLOCK_SIZE, 2, BLOCK_SIZE - 1);
                 }
             }
         }
 
-        // 현재 블록 그리기
         if (currentBlock) {
-            ctx.fillStyle = COLORS[currentBlock.type];
+            // 고스트 블럭 먼저 그리기 (반투명)
+            const ghostPos = getGhostPosition();
+            if (ghostPos) {
+                const ghostGradient = ctx.createLinearGradient(
+                    ghostPos.x * BLOCK_SIZE,
+                    ghostPos.y * BLOCK_SIZE,
+                    (ghostPos.x + 1) * BLOCK_SIZE,
+                    (ghostPos.y + 1) * BLOCK_SIZE
+                );
+                ghostGradient.addColorStop(0, COLORS[currentBlock.type] + '40');
+                ghostGradient.addColorStop(1, COLORS[currentBlock.type] + '20');
+
+                ctx.fillStyle = ghostGradient;
+                for (let y = 0; y < currentBlock.shape.length; y++) {
+                    for (let x = 0; x < currentBlock.shape[y].length; x++) {
+                        if (currentBlock.shape[y][x]) {
+                            ctx.fillRect(
+                                (ghostPos.x + x) * BLOCK_SIZE,
+                                (ghostPos.y + y) * BLOCK_SIZE,
+                                BLOCK_SIZE - 1,
+                                BLOCK_SIZE - 1
+                            );
+                        }
+                    }
+                }
+            }
+
+            // 실제 블럭 그리기
             for (let y = 0; y < currentBlock.shape.length; y++) {
                 for (let x = 0; x < currentBlock.shape[y].length; x++) {
                     if (currentBlock.shape[y][x]) {
-                        ctx.fillRect(
-                            (currentBlock.position.x + x) * BLOCK_SIZE,
-                            (currentBlock.position.y + y) * BLOCK_SIZE,
-                            BLOCK_SIZE - 1,
-                            BLOCK_SIZE - 1
+                        const blockX = (currentBlock.position.x + x) * BLOCK_SIZE;
+                        const blockY = (currentBlock.position.y + y) * BLOCK_SIZE;
+
+                        // 그라데이션 생성
+                        const gradient = ctx.createLinearGradient(
+                            blockX,
+                            blockY,
+                            blockX + BLOCK_SIZE,
+                            blockY + BLOCK_SIZE
                         );
+                        gradient.addColorStop(0, COLORS[currentBlock.type]);
+                        gradient.addColorStop(1, adjustColor(COLORS[currentBlock.type], -30));
+
+                        // 블록 그리기
+                        ctx.fillStyle = gradient;
+                        ctx.fillRect(blockX, blockY, BLOCK_SIZE - 1, BLOCK_SIZE - 1);
+
+                        // 하이라이트 효과
+                        ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+                        ctx.fillRect(blockX, blockY, BLOCK_SIZE - 1, 2);
+                        ctx.fillRect(blockX, blockY, 2, BLOCK_SIZE - 1);
+
+                        // 그림자 효과
+                        ctx.fillStyle = 'rgba(0, 0, 0, 0.2)';
+                        ctx.fillRect(blockX + BLOCK_SIZE - 2, blockY, 2, BLOCK_SIZE - 1);
+                        ctx.fillRect(blockX, blockY + BLOCK_SIZE - 2, BLOCK_SIZE - 1, 2);
                     }
                 }
             }
         }
-    }, [board, currentBlock]);
+    }, [board, currentBlock, getGhostPosition]);
+
+    // 색상 밝기 조절 함수
+    const adjustColor = (color: string, amount: number): string => {
+        const hex = color.replace('#', '');
+        const r = Math.max(0, Math.min(255, parseInt(hex.substr(0, 2), 16) + amount));
+        const g = Math.max(0, Math.min(255, parseInt(hex.substr(2, 2), 16) + amount));
+        const b = Math.max(0, Math.min(255, parseInt(hex.substr(4, 2), 16) + amount));
+        return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+    };
 
     return (
-        <div className="flex flex-col items-center justify-center min-h-screen bg-gray-900 text-white">
+        <div className="flex flex-col items-center justify-center h-[calc(100vh-4rem)]">
             <h1 className="text-4xl font-bold mb-4">테트리스</h1>
             <div className="mb-4">
                 <p className="text-xl">점수: {score}</p>
+                <p className="text-sm text-gray-300">레벨: {level}</p>
+                {nextBlockType && (
+                    <div className="mt-2 text-sm text-gray-300">
+                        <p>다음 블럭:</p>
+                        <div className="inline-block p-2 border border-gray-400">
+                            {BLOCKS[nextBlockType].map((row, y) => (
+                                <div key={y} className="flex">
+                                    {row.map((cell, x) => (
+                                        <div
+                                            key={x}
+                                            style={{
+                                                width: 12,
+                                                height: 12,
+                                                backgroundColor: cell ? COLORS[nextBlockType] : 'transparent',
+                                                border: cell ? '1px solid #444' : '1px solid transparent'
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                )}
             </div>
             <canvas
                 ref={canvasRef}
@@ -335,4 +538,4 @@ const TetrisGame: React.FC = () => {
     );
 };
 
-export default TetrisGame; 
+export default TetrisGame;
